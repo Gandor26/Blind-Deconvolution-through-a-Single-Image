@@ -1,6 +1,5 @@
 #include "compressedSense.h"
 #include <iostream>
-#include <cmath>
 using namespace std;
 
 compressedSense::compressedSense(int kernel_count, int img_count)
@@ -80,21 +79,96 @@ void compressedSense::Vector2Mat(CvMat *f)
     cout << "Matriclized done!" << endl;
 }
 
-void compressedSense::PCG(CvMat* A, CvMat* b, CvMat *x, CvMat *Pinv, double tol, int maxiter)
+void compressedSense::MulA(CvMat* A, CvMat* d1, CvMat* d2, CvMat* x, CvMat* dst)
 {
     int dim = A->rows;
+    if (x->rows != dst->rows || x->rows != dim * 2)
+    {
+        cerr << "Matrix Size Error!" << endl;
+        return;
+    }
+    CvMat* x1 = cvCreateMat(dim, 1, CV_64FC1);
+    CvMat* x2 = cvCreateMat(dim, 1, CV_64FC1);
+    CvMat* dst1 = cvCreateMat(dim, 1, CV_64FC1);
+    CvMat* dst2 = cvCreateMat(dim, 1, CV_64FC1);
+    CvMat* tmp = cvCreateMat(dim, 1, CV_64FC1);
+    for (int i = 0; i < dim; i++)
+    {
+        cvmSet(x1, i, 0, cvmGet(x, i, 0));
+        cvmSet(x2, i, 0, cvmGet(x, i+dim, 0));
+    }
+    cvGEMM(A, x1, 1.0, NULL, 0.0, dst1);
+    cvMul(d1, x1, tmp, 1.0);
+    cvAdd(dst1, tmp, dst1);
+    cvMul(d2, x2, tmp, 1.0);
+    cvAdd(dst1, tmp, dst1);
+    cvMul(d2, x1, dst2, 1.0);
+    cvMul(d1, x2, tmp, 1.0);
+    cvAdd(dst2, tmp, dst2);
+    for (int i = 0; i < dim; i++)
+    {
+        cvmSet(dst, i, 0, cvmGet(dst1, i, 0));
+        cvmSet(dst, i+dim, 0, cvmGet(dst2, i, 0));
+    }
+    cvReleaseMat(&x1);
+    cvReleaseMat(&x2);
+    cvReleaseMat(&dst1);
+    cvReleaseMat(&dst2);
+    cvReleaseMat(&tmp);
+}
+
+void compressedSense::MulPinv(CvMat* p1, CvMat* p2, CvMat* p3, CvMat* x, CvMat* dst)
+{
+    int dim = p1->rows;
+    if (x->rows != dst->rows || x->rows != dim * 2 || p1->rows != p2->rows || p1->rows != p2->rows)
+    {
+        cerr << "Matrix Size Error!" << endl;
+        return;
+    }
+    CvMat* x1 = cvCreateMat(dim, 1, CV_64FC1);
+    CvMat* x2 = cvCreateMat(dim, 1, CV_64FC1);
+    CvMat* dst1 = cvCreateMat(dim, 1, CV_64FC1);
+    CvMat* dst2 = cvCreateMat(dim, 1, CV_64FC1);
+    CvMat* tmp = cvCreateMat(dim, 1, CV_64FC1);
+    for (int i = 0; i < dim; i++)
+    {
+        cvmSet(x1, i, 0, cvmGet(x, i, 0));
+        cvmSet(x2, i, 0, cvmGet(x, i+dim, 0));
+    }
+    cvMul(p1, x1, dst1, 1.0);
+    cvMul(p2, x2, tmp, 1.0);
+    cvSub(dst1, tmp, dst1);
+    cvMul(p2, x1, dst2, 1.0);
+    cvMul(p3, x2, tmp, 1.0);
+    cvSub(tmp, dst2, dst2);
+    for (int i = 0; i < dim; i++)
+    {
+        cvmSet(dst, i, 0, cvmGet(dst1, i, 0));
+        cvmSet(dst, i+dim, 0, cvmGet(dst2, i, 0));
+    }
+    cvReleaseMat(&x1);
+    cvReleaseMat(&x2);
+    cvReleaseMat(&dst1);
+    cvReleaseMat(&dst2);
+    cvReleaseMat(&tmp);
+}
+
+void compressedSense::PCG(CvMat* A, CvMat* b, CvMat* x, CvMat* d1, CvMat* d2,
+                          CvMat* p1, CvMat* p2, CvMat* p3, double tol, int maxiter)
+{
+    int dim = x->rows;
     int iter = 0;
     bool flag = false;
 
     cvSetZero(x);
     CvMat *r = cvCloneMat(b);
     CvMat *z = cvCreateMat(dim, 1, CV_64FC1);
-    if (Pinv == NULL)
-    {
-        Pinv = cvCreateMat(dim, 1, CV_64FC1);
-        cvSetIdentity(Pinv);
-    }
-    cvGEMM(Pinv, r, 1.0, NULL, 0.0, z, 0);
+//    if (Pinv == NULL)
+//    {
+//        Pinv = cvCreateMat(dim, 1, CV_64FC1);
+//        cvSetIdentity(Pinv);
+//    }
+    MulPinv(p1, p2, p3, r, z);
     CvMat *p = cvCloneMat(z);
     CvMat *Ap = cvCreateMat(dim, 1, CV_64FC1);
 
@@ -102,12 +176,12 @@ void compressedSense::PCG(CvMat* A, CvMat* b, CvMat *x, CvMat *Pinv, double tol,
     {
         iter++;
         if (iter > maxiter) break;
-        cvGEMM(A, p, 1.0, NULL, 0, Ap, 0);
+        MulA(A, d1, d2, p, Ap);
         double rou = cvDotProduct(r, z);
         double alpha = rou / cvDotProduct(p, Ap);
         cvScaleAdd(p, cvScalarAll(alpha), x, x);
         cvScaleAdd(Ap, cvScalarAll(-alpha), r, r);
-        cvGEMM(Pinv, r, 1.0, NULL, 0, z, 0);
+        MulPinv(p1, p2, p3, r, z);
         double beta = cvDotProduct(r, z) / rou;
         cvScaleAdd(p, cvScalarAll(beta), z, p);
         if (cvNorm(r, NULL, CV_L2, NULL) < eps)
@@ -143,10 +217,13 @@ void compressedSense::calcNewtonDirection(CvMat *dx, CvMat *du, CvMat *gradPhi_t
         cvmSet(d2, i, 0, (cvmGet(q1, i, 0)*cvmGet(q1, i, 0) - cvmGet(q2, i, 0)*cvmGet(q2, i, 0))/t);
     }
 
-    CvMat *hessPhi_t = cvCreateMat(2*kernelCount, 2*kernelCount, CV_64FC1);
+    //CvMat *hessPhi_t = cvCreateMat(2*kernelCount, 2*kernelCount, CV_64FC1);
     CvMat *dxdu = cvCreateMat(2*kernelCount, 1, CV_64FC1);
-    CvMat *PrecondInv = cvCreateMat(2*kernelCount, 2*kernelCount, CV_64FC1);
-    cvSetZero(PrecondInv);
+    CvMat *p1 = cvCreateMat(kernelCount, 1, CV_64FC1);
+    CvMat *p2 = cvCreateMat(kernelCount, 1, CV_64FC1);
+    CvMat *p3 = cvCreateMat(kernelCount, 1, CV_64FC1);
+    //CvMat *PrecondInv = cvCreateMat(2*kernelCount, 2*kernelCount, CV_64FC1);
+    //cvSetZero(PrecondInv);
     cvGEMM(A, z, 2.0, NULL, 0.0, tmpN, CV_GEMM_A_T);
     cvGEMM(A, A, 2.0, NULL, 0.0, tmpNN, CV_GEMM_A_T);       //tmpNN = 2A'A = grad^2(||Ax-y||^2);
 
@@ -156,23 +233,26 @@ void compressedSense::calcNewtonDirection(CvMat *dx, CvMat *du, CvMat *gradPhi_t
         cvmSet(gradPhi_t, i+kernelCount, 0, lambda - (cvmGet(q1, i, 0) + cvmGet(q2, i, 0)) / t);    //gradPhi_t(N+1:2N) = lambda - (1./(u+x)+1./(u-x))/t
         double prb = cvmGet(d1, i, 0) + cvmGet(tmpNN, i, i);
         double prs = prb * cvmGet(d1, i, 0) - cvmGet(d2, i, 0)*cvmGet(d2, i, 0);
+        cvmSet(p1, i, 0, cvmGet(d1, i, 0) / prs);
+        cvmSet(p2, i, 0, cvmGet(d2, i, 0) / prs);
+        cvmSet(p3, i, 0, prb / prs);
 
-        for (int j = 0; j < kernelCount; j++)
-        {
-            double x1 = (j == i)?cvmGet(d1, i, 0):0;
-            double x2 = (j == i)?cvmGet(d2, i, 0):0;
-            cvmSet(hessPhi_t, i, j, cvmGet(tmpNN, i, j) + x1);
-            cvmSet(hessPhi_t, i+kernelCount, j, x2);
-            cvmSet(hessPhi_t, i, j+kernelCount, x2);
-            cvmSet(hessPhi_t, i+kernelCount, j+kernelCount, x1);
-            if (j == i)
-            {
-                cvmSet(PrecondInv, i, i, x1 / prs);
-                cvmSet(PrecondInv, i+kernelCount, i, -x2 / prs);
-                cvmSet(PrecondInv, i, i+kernelCount, -x2 / prs);
-                cvmSet(PrecondInv, i+kernelCount, i+kernelCount, prb / prs);
-            }
-        }
+//        for (int j = 0; j < kernelCount; j++)
+//        {
+//            double x1 = (j == i)?cvmGet(d1, i, 0):0;
+//            double x2 = (j == i)?cvmGet(d2, i, 0):0;
+//            cvmSet(hessPhi_t, i, j, cvmGet(tmpNN, i, j) + x1);
+//            cvmSet(hessPhi_t, i+kernelCount, j, x2);
+//            cvmSet(hessPhi_t, i, j+kernelCount, x2);
+//            cvmSet(hessPhi_t, i+kernelCount, j+kernelCount, x1);
+//            if (j == i)
+//            {
+//                cvmSet(PrecondInv, i, i, x1 / prs);
+//                cvmSet(PrecondInv, i+kernelCount, i, -x2 / prs);
+//                cvmSet(PrecondInv, i, i+kernelCount, -x2 / prs);
+//                cvmSet(PrecondInv, i+kernelCount, i+kernelCount, prb / prs);
+//            }
+//        }
     }
 
 //    for (int i = 0; i < 2*kernelCount; i++)
@@ -189,7 +269,7 @@ void compressedSense::calcNewtonDirection(CvMat *dx, CvMat *du, CvMat *gradPhi_t
     double normg = cvNorm(gradPhi_t, NULL, CV_L2, NULL);
     double pcgtol = min(1e-1, 1e-3*eita/min(1.0, normg));
     cvConvertScale(gradPhi_t, gradPhi_t, -1.0, 0.0);
-    PCG(hessPhi_t, gradPhi_t, dxdu, PrecondInv, pcgtol, 20);
+    PCG(tmpNN, gradPhi_t, dxdu, d1, d2, p1, p2, p3, pcgtol, 20);
     cvConvertScale(gradPhi_t, gradPhi_t, -1.0, 0.0);
 
     for (int i = 0; i < kernelCount; i++)
@@ -204,9 +284,12 @@ void compressedSense::calcNewtonDirection(CvMat *dx, CvMat *du, CvMat *gradPhi_t
     cvReleaseMat(&q2);
     cvReleaseMat(&d1);
     cvReleaseMat(&d2);
-    cvReleaseMat(&hessPhi_t);
+    cvReleaseMat(&p1);
+    cvReleaseMat(&p2);
+    cvReleaseMat(&p3);
+    //cvReleaseMat(&hessPhi_t);
     cvReleaseMat(&dxdu);
-    cvReleaseMat(&PrecondInv);
+    //cvReleaseMat(&PrecondInv);
 }
 
 double compressedSense::phi_t(CvMat* x, CvMat* u, CvMat* z)
@@ -317,8 +400,6 @@ void compressedSense::solveOptm()
         /*          compute approximate Newton Direction         */
 
         calcNewtonDirection(dx, du, gradPhi_t);
-        for (int i = 0; i < kernelCount; i++)
-            cout << "dx = " << cvmGet(dx, i, 0) << "du = " << cvmGet(du, i, 0) << endl;
 
         /*          backtracking line search         */
 
